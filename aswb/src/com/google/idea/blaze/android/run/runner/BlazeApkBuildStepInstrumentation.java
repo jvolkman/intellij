@@ -31,25 +31,32 @@ import com.google.idea.blaze.base.command.buildresult.BuildResultHelper.GetArtif
 import com.google.idea.blaze.base.command.buildresult.BuildResultHelperProvider;
 import com.google.idea.blaze.base.console.BlazeConsoleLineProcessorProvider;
 import com.google.idea.blaze.base.filecache.FileCaches;
+import com.google.idea.blaze.base.ideinfo.Dependency;
+import com.google.idea.blaze.base.ideinfo.TargetIdeInfo;
+import com.google.idea.blaze.base.ideinfo.TargetKey;
+import com.google.idea.blaze.base.ideinfo.TargetMap;
+import com.google.idea.blaze.base.model.BlazeProjectData;
 import com.google.idea.blaze.base.model.primitives.Label;
 import com.google.idea.blaze.base.model.primitives.WorkspaceRoot;
 import com.google.idea.blaze.base.scope.BlazeContext;
 import com.google.idea.blaze.base.scope.ScopedTask;
 import com.google.idea.blaze.base.scope.output.IssueOutput;
 import com.google.idea.blaze.base.settings.Blaze;
+import com.google.idea.blaze.base.sync.data.BlazeProjectDataManager;
 import com.google.idea.blaze.base.util.SaveUtil;
+import com.google.idea.blaze.java.AndroidBlazeRules;
 import com.intellij.execution.ExecutionException;
 import com.intellij.openapi.project.Project;
 import java.util.concurrent.CancellationException;
 
-/** Builds the APK using normal blaze build. */
-public class BlazeApkBuildStepNormalBuild implements BlazeApkBuildStep {
+/** Builds the APKs required for an android instrumentation test. */
+public class BlazeApkBuildStepInstrumentation implements BlazeApkBuildStep {
   private final Project project;
   private final Label label;
   private final ImmutableList<String> buildFlags;
   private BlazeAndroidDeployInfo deployInfo = null;
 
-  public BlazeApkBuildStepNormalBuild(
+  public BlazeApkBuildStepInstrumentation(
       Project project, Label label, ImmutableList<String> buildFlags) {
     this.project = project;
     this.label = label;
@@ -63,6 +70,67 @@ public class BlazeApkBuildStepNormalBuild implements BlazeApkBuildStep {
         new ScopedTask<Void>(context) {
           @Override
           protected Void execute(BlazeContext context) {
+            BlazeProjectData projectData =
+                BlazeProjectDataManager.getInstance(project).getBlazeProjectData();
+            if (projectData == null) {
+              IssueOutput.error("Invalid project data. Please sync the project.").submit(context);
+              return null;
+            }
+
+            TargetMap targetMap = projectData.getTargetMap();
+            TargetIdeInfo target = targetMap.get(TargetKey.forPlainTarget(label));
+            if (target == null
+                || target.getKind()
+                    != AndroidBlazeRules.RuleTypes.ANDROID_INSTRUMENTATION_TEST.getKind()) {
+              IssueOutput.error("Invalid target map. Please sync the project.").submit(context);
+              return null;
+            }
+
+            // the test binary is referenced by the "test_app" attribute of an
+            // android_instrumentation_test target.  Here we can extract it by looking in the list
+            // of deps, and take the first dependency of kind android_binary, because an
+            // android_instrumentation_test should only depend on one android_binary target.
+            // TODO this assumption can break.  can we use aspects instead?
+            TargetKey testTargetKey = null;
+            for (Dependency dependency : target.getDependencies()) {
+              TargetIdeInfo dependencyInfo = targetMap.get(dependency.getTargetKey());
+              // Should exist via test_app attribute, and be unique.
+              if (dependencyInfo != null
+                  && dependencyInfo.getKind()
+                      == AndroidBlazeRules.RuleTypes.ANDROID_BINARY.getKind()) {
+                testTargetKey = dependency.getTargetKey();
+              }
+            }
+
+            if (testTargetKey == null) {
+              IssueOutput.error("Cannot find test target. Please sync the project.")
+                  .submit(context);
+              return null;
+            }
+
+            // the target binary is referenced by the "instruments" attribute of an android_binary
+            // target.  Here we can extract it by looking in the list of deps, and take the first
+            // dependency of kind android_binary, because an android_binary target should only
+            // depend on one android_binary target.
+            // TODO this assumption can break.  can we use aspects instead?
+            TargetIdeInfo testTarget = targetMap.get(testTargetKey);
+            TargetKey targetTargetKey = null;
+            for (Dependency dependency : testTarget.getDependencies()) {
+              TargetIdeInfo dependencyInfo = targetMap.get(dependency.getTargetKey());
+              // Should exist via test_app attribute, and be unique.
+              if (dependencyInfo != null
+                  && dependencyInfo.getKind()
+                      == AndroidBlazeRules.RuleTypes.ANDROID_BINARY.getKind()) {
+                targetTargetKey = dependency.getTargetKey();
+              }
+            }
+
+            if (targetTargetKey == null) {
+              IssueOutput.error("Cannot find instrument target. Please sync the project.")
+                  .submit(context);
+              return null;
+            }
+
             BlazeCommand.Builder command =
                 BlazeCommand.builder(
                     Blaze.getBuildSystemProvider(project).getBinaryPath(project),
@@ -74,7 +142,7 @@ public class BlazeApkBuildStepNormalBuild implements BlazeApkBuildStep {
             try (BuildResultHelper buildResultHelper = BuildResultHelperProvider.create(project)) {
 
               command
-                  .addTargets(label)
+                  .addTargets(testTargetKey.getLabel(), targetTargetKey.getLabel())
                   .addBlazeFlags("--output_groups=+android_deploy_info")
                   .addBlazeFlags(buildFlags)
                   .addBlazeFlags(buildResultHelper.getBuildFlags());
@@ -98,10 +166,12 @@ public class BlazeApkBuildStepNormalBuild implements BlazeApkBuildStep {
               }
               try {
                 deployInfo =
-                    deployInfoHelper.readDeployInfo(
+                    deployInfoHelper.readDeployInfoForInstrumentationTest(
                         context,
                         buildResultHelper,
-                        fileName -> fileName.endsWith(".deployinfo.pb"));
+                        fileName -> fileName.endsWith(".deployinfo.pb"),
+                        testTargetKey.getLabel(),
+                        targetTargetKey.getLabel());
               } catch (GetArtifactsException e) {
                 IssueOutput.error("Could not read apk deploy info from build: " + e.getMessage())
                     .submit(context);
