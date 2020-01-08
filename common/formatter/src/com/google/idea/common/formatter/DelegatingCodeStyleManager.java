@@ -30,6 +30,8 @@ import com.intellij.psi.codeStyle.FormattingModeAwareIndentAdjuster;
 import com.intellij.psi.codeStyle.Indent;
 import com.intellij.util.IncorrectOperationException;
 import com.intellij.util.ThrowableRunnable;
+import org.jetbrains.annotations.NotNull;
+
 import java.util.Collection;
 import javax.annotation.Nullable;
 
@@ -198,5 +200,10 @@ public abstract class DelegatingCodeStyleManager extends CodeStyleManager
   @Override
   public <T> T performActionWithFormatterDisabled(Computable<T> r) {
     return delegate.performActionWithFormatterDisabled(r);
+  }
+
+  @Override
+  public void scheduleIndentAdjustment(@NotNull Document document, int offset) {
+    delegate.scheduleIndentAdjustment(document, offset);
   }
 }
